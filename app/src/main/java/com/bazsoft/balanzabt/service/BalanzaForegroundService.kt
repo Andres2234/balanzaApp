@@ -24,13 +24,12 @@ class BalanzaForegroundService : Service() {
         const val CHANNEL_ID = "balanza_channel"
         const val NOTIF_ID = 1
 
-        // Acciones para comunicarse con MainActivity
         const val ACTION_SELECCIONAR_DISPOSITIVO = "SELECCIONAR_DISPOSITIVO"
         const val ACTION_PESO_RECIBIDO = "com.bazsoft.balanzabt.PESO_RECIBIDO"
         const val ACTION_CONECTADO     = "com.bazsoft.balanzabt.CONECTADO"
         const val ACTION_ERROR         = "com.bazsoft.balanzabt.ERROR"
+        const val ACTION_RAW           = "com.bazsoft.balanzabt.RAW"
 
-        // Extras
         const val EXTRA_DEVICE_ADDRESS = "device_address"
         const val EXTRA_DEVICE_NAME    = "device_name"
         const val EXTRA_PESO           = "peso"
@@ -38,6 +37,7 @@ class BalanzaForegroundService : Service() {
         const val EXTRA_CODIGO         = "codigo"
         const val EXTRA_HORA           = "hora"
         const val EXTRA_ERROR          = "error"
+        const val EXTRA_RAW            = "raw"
 
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
         const val BACKEND_URL = "https://bazsoft.sosnegocios.com/apiBalanza/balanza/peso"
@@ -79,8 +79,8 @@ class BalanzaForegroundService : Service() {
                 actualizarNotificacion("Conectando a $deviceName...")
                 conectarYLeer()
             } catch (e: Exception) {
-                Log.e(TAG, "Error de conexión: ${e.message}")
-                enviarBroadcast(ACTION_ERROR, error = "Reconectando en 5s... (${e.message})")
+                Log.e(TAG, "Error: ${e.message}")
+                enviarBroadcast(ACTION_ERROR, error = "${e.message}")
                 actualizarNotificacion("Reconectando en 5s...")
                 Thread.sleep(5000)
             }
@@ -95,9 +95,8 @@ class BalanzaForegroundService : Service() {
         bluetoothSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
         bluetoothSocket!!.connect()
 
-        // Notificar conexión exitosa
-        Log.d(TAG, "✅ Conectado a $deviceName")
-        actualizarNotificacion("✅ Conectado a $deviceName")
+        Log.d(TAG, "Conectado a $deviceName")
+        actualizarNotificacion("Conectado a $deviceName — leyendo...")
         enviarBroadcast(ACTION_CONECTADO)
 
         val inputStream = bluetoothSocket!!.inputStream
@@ -107,38 +106,56 @@ class BalanzaForegroundService : Service() {
         while (isRunning) {
             val bytes    = inputStream.read(buffer)
             val fragment = String(buffer, 0, bytes, Charsets.US_ASCII)
+
+            // Mostrar datos crudos en pantalla para diagnóstico
+            val hex = buffer.take(bytes).joinToString(" ") { "%02X".format(it) }
+            Log.d(TAG, "RAW texto: [${fragment.replace("\r", "\\r").replace("\n", "\\n")}]")
+            Log.d(TAG, "RAW hex:   [$hex]")
+
+            // Enviar datos crudos a la UI para que los veas en pantalla
+            enviarBroadcast(ACTION_RAW, raw = fragment.replace("\r", "\\r").replace("\n", "\\n"))
+
             acumulado.append(fragment)
 
+            // Intentar separar por "=" (tu protocolo original)
             var idx: Int
             while (acumulado.indexOf("=").also { idx = it } >= 0) {
                 val trama = acumulado.substring(0, idx)
                 acumulado.delete(0, idx + 1)
+                Log.d(TAG, "TRAMA extraída: [$trama] largo=${trama.length}")
                 procesarTrama(trama)
+            }
+
+            // Si acumula demasiado sin encontrar "=", mostrar y limpiar
+            if (acumulado.length > 200) {
+                Log.w(TAG, "Buffer lleno sin '=': [${acumulado.toString().take(100)}]")
+                acumulado.clear()
             }
         }
     }
 
     private fun procesarTrama(trama: String) {
-        if (trama.length < 9) return
+        Log.d(TAG, "Procesando trama largo=${trama.length}: [$trama]")
+
+        if (trama.length < 9) {
+            Log.w(TAG, "Trama muy corta: ${trama.length} chars")
+            return
+        }
 
         val pesoReal   = trama.substring(0, 8).trim()
-        val digControl = trama.substring(8, 1)
+        val digControl = trama.substring(8, 9)  // corregido: era (8,1) debería ser (8,9)
         val estado = when (digControl) {
             "B"  -> "Estable"
             "@"  -> "Inestable"
             "C"  -> "Cero Estable"
             "A"  -> "Cero Inestable"
-            else -> "Desconocido"
+            else -> "Desconocido ($digControl)"
         }
         val hora = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
 
-        Log.d(TAG, "Peso: $pesoReal | Estado: $estado")
+        Log.d(TAG, "Peso=$pesoReal Estado=$estado Codigo=$digControl")
         actualizarNotificacion("$pesoReal kg — $estado")
-
-        // Enviar a la UI
         enviarBroadcast(ACTION_PESO_RECIBIDO, pesoReal, estado, digControl, hora)
-
-        // Enviar al backend
         enviarAlBackend(pesoReal, estado, digControl)
     }
 
@@ -148,7 +165,8 @@ class BalanzaForegroundService : Service() {
         estado: String = "",
         codigo: String = "",
         hora: String = "",
-        error: String = ""
+        error: String = "",
+        raw: String = ""
     ) {
         val intent = Intent(action).apply {
             putExtra(EXTRA_PESO, peso)
@@ -156,6 +174,7 @@ class BalanzaForegroundService : Service() {
             putExtra(EXTRA_CODIGO, codigo)
             putExtra(EXTRA_HORA, hora)
             putExtra(EXTRA_ERROR, error)
+            putExtra(EXTRA_RAW, raw)
             putExtra(EXTRA_DEVICE_NAME, deviceName)
             setPackage(packageName)
         }
@@ -171,7 +190,7 @@ class BalanzaForegroundService : Service() {
                 Log.d(TAG, "Backend OK: $peso")
             }
             override fun onFailure(call: Call, e: IOException) {
-                Log.w(TAG, "Backend no disponible aún: ${e.message}")
+                Log.w(TAG, "Backend no disponible: ${e.message}")
             }
         })
     }

@@ -29,9 +29,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvPeso: TextView
     private lateinit var tvEstadoPeso: TextView
     private lateinit var tvHora: TextView
+    private lateinit var tvRaw: TextView
     private var selectedDevice: BluetoothDevice? = null
 
-    // Recibe broadcasts del servicio para actualizar la UI
     private val pesoReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -44,11 +44,22 @@ class MainActivity : AppCompatActivity() {
                 }
                 BalanzaForegroundService.ACTION_CONECTADO -> {
                     val nombre = intent.getStringExtra(BalanzaForegroundService.EXTRA_DEVICE_NAME) ?: "Balanza"
-                    mostrarConectado(nombre)
+                    layoutPeso.visibility = android.view.View.VISIBLE
+                    tvEstado.text = "Conectado a: $nombre"
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Conectado con exito")
+                        .setMessage("Balanza: $nombre\nLeyendo peso en tiempo real...")
+                        .setPositiveButton("OK", null)
+                        .show()
                 }
                 BalanzaForegroundService.ACTION_ERROR -> {
-                    val error = intent.getStringExtra(BalanzaForegroundService.EXTRA_ERROR) ?: "Error desconocido"
-                    tvEstado.text = "❌ Error: $error"
+                    val error = intent.getStringExtra(BalanzaForegroundService.EXTRA_ERROR) ?: ""
+                    tvEstado.text = "Reconectando... ($error)"
+                }
+                BalanzaForegroundService.ACTION_RAW -> {
+                    val raw = intent.getStringExtra(BalanzaForegroundService.EXTRA_RAW) ?: ""
+                    layoutPeso.visibility = android.view.View.VISIBLE
+                    tvRaw.text = "Datos BT recibidos:\n$raw"
                 }
             }
         }
@@ -58,14 +69,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        listView      = findViewById(R.id.listDispositivos)
-        btnIniciar    = findViewById(R.id.btnIniciar)
-        btnDetener    = findViewById(R.id.btnDetener)
-        tvEstado      = findViewById(R.id.tvEstado)
-        layoutPeso    = findViewById(R.id.layoutPeso)
-        tvPeso        = findViewById(R.id.tvPeso)
-        tvEstadoPeso  = findViewById(R.id.tvEstadoPeso)
-        tvHora        = findViewById(R.id.tvHora)
+        listView     = findViewById(R.id.listDispositivos)
+        btnIniciar   = findViewById(R.id.btnIniciar)
+        btnDetener   = findViewById(R.id.btnDetener)
+        tvEstado     = findViewById(R.id.tvEstado)
+        layoutPeso   = findViewById(R.id.layoutPeso)
+        tvPeso       = findViewById(R.id.tvPeso)
+        tvEstadoPeso = findViewById(R.id.tvEstadoPeso)
+        tvHora       = findViewById(R.id.tvHora)
+        tvRaw        = findViewById(R.id.tvRaw)
 
         layoutPeso.visibility = android.view.View.GONE
         verificarYPedirPermisos()
@@ -77,6 +89,7 @@ class MainActivity : AppCompatActivity() {
             addAction(BalanzaForegroundService.ACTION_PESO_RECIBIDO)
             addAction(BalanzaForegroundService.ACTION_CONECTADO)
             addAction(BalanzaForegroundService.ACTION_ERROR)
+            addAction(BalanzaForegroundService.ACTION_RAW)
         }
         registerReceiver(pesoReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
     }
@@ -86,30 +99,18 @@ class MainActivity : AppCompatActivity() {
         try { unregisterReceiver(pesoReceiver) } catch (e: Exception) {}
     }
 
-    private fun mostrarConectado(nombre: String) {
-        tvEstado.text = "✅ Conectado a: $nombre"
-        layoutPeso.visibility = android.view.View.VISIBLE
-
-        AlertDialog.Builder(this)
-            .setTitle("✅ Conectado con éxito")
-            .setMessage("Balanza: $nombre\n\nLeyendo peso en tiempo real...")
-            .setPositiveButton("OK", null)
-            .show()
-    }
-
     private fun mostrarPeso(peso: String, estado: String, codigo: String, hora: String) {
         layoutPeso.visibility = android.view.View.VISIBLE
         tvPeso.text = "$peso kg"
-        tvHora.text = "Última lectura: $hora"
-
+        tvHora.text = "Ultima lectura: $hora"
         val (color, emoji) = when (codigo) {
-            "B"  -> Pair("#28a745", "✅")
-            "@"  -> Pair("#dc3545", "⚠️")
-            "C"  -> Pair("#007bff", "◎")
-            "A"  -> Pair("#fd7e14", "~")
-            else -> Pair("#888888", "?")
+            "B"  -> Pair("#28a745", "Estable")
+            "@"  -> Pair("#dc3545", "Inestable")
+            "C"  -> Pair("#007bff", "Cero Estable")
+            "A"  -> Pair("#fd7e14", "Cero Inestable")
+            else -> Pair("#888888", estado)
         }
-        tvEstadoPeso.text = "$emoji $estado"
+        tvEstadoPeso.text = emoji
         tvEstadoPeso.setTextColor(android.graphics.Color.parseColor(color))
     }
 
@@ -130,25 +131,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-            cargarDispositivos()
-        } else {
-            tvEstado.text = "❌ Permisos Bluetooth denegados — ve a Ajustes → Apps → Balanza BT → Permisos"
-        }
+        if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) cargarDispositivos()
+        else tvEstado.text = "Permisos Bluetooth denegados"
     }
 
     private fun cargarDispositivos() {
         val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null || !adapter.isEnabled) {
-            tvEstado.text = "⚠️ Activa el Bluetooth"
-            return
-        }
-
+        if (adapter == null || !adapter.isEnabled) { tvEstado.text = "Activa el Bluetooth"; return }
         val paired = adapter.bondedDevices.toList()
-        if (paired.isEmpty()) {
-            tvEstado.text = "⚠️ No hay dispositivos emparejados"
-            return
-        }
+        if (paired.isEmpty()) { tvEstado.text = "No hay dispositivos emparejados"; return }
 
         val nombres = paired.map { it.name ?: it.address }.toTypedArray()
         listView.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, nombres)
@@ -158,42 +149,31 @@ class MainActivity : AppCompatActivity() {
         val savedAddress = prefs.getString("last_device_address", null)
         if (savedAddress != null) {
             val idx = paired.indexOfFirst { it.address == savedAddress }
-            if (idx >= 0) {
-                listView.setItemChecked(idx, true)
-                selectedDevice = paired[idx]
-                tvEstado.text = "Servicio guardado: ${paired[idx].name}"
-            }
-        } else {
-            tvEstado.text = "Selecciona tu balanza y presiona Iniciar"
+            if (idx >= 0) { listView.setItemChecked(idx, true); selectedDevice = paired[idx] }
         }
+        tvEstado.text = "Selecciona tu balanza y presiona Iniciar"
 
-        listView.setOnItemClickListener { _, _, position, _ ->
-            selectedDevice = paired[position]
-        }
+        listView.setOnItemClickListener { _, _, position, _ -> selectedDevice = paired[position] }
 
         btnIniciar.setOnClickListener {
             val dev = selectedDevice ?: run {
                 Toast.makeText(this, "Selecciona una balanza primero", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            prefs.edit()
-                .putString("last_device_address", dev.address)
-                .putString("last_device_name", dev.name ?: dev.address)
-                .apply()
-
+            prefs.edit().putString("last_device_address", dev.address).putString("last_device_name", dev.name ?: dev.address).apply()
             val serviceIntent = Intent(this, BalanzaForegroundService::class.java).apply {
                 action = BalanzaForegroundService.ACTION_SELECCIONAR_DISPOSITIVO
                 putExtra(BalanzaForegroundService.EXTRA_DEVICE_ADDRESS, dev.address)
                 putExtra(BalanzaForegroundService.EXTRA_DEVICE_NAME, dev.name ?: "Balanza")
             }
             startForegroundService(serviceIntent)
-            tvEstado.text = "🔄 Conectando a ${dev.name}..."
+            tvEstado.text = "Conectando a ${dev.name}..."
         }
 
         btnDetener.setOnClickListener {
             stopService(Intent(this, BalanzaForegroundService::class.java))
             prefs.edit().remove("last_device_address").apply()
-            tvEstado.text = "🔴 Servicio detenido"
+            tvEstado.text = "Servicio detenido"
             layoutPeso.visibility = android.view.View.GONE
         }
     }
