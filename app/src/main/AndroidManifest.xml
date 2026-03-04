@@ -13,18 +13,30 @@
 
     <application
         android:allowBackup="true"
-	android:icon="@android:drawable/ic_menu_compass"
+        android:icon="@android:drawable/ic_menu_compass"
         android:label="Balanza BT"
         android:supportsRtl="true"
         android:theme="@style/Theme.BalanzaBT">
 
         <activity
             android:name=".ui.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
+
+            <!-- Launcher normal -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Deep Link desde la web: balanzabt://vincular?token=...&usuario=...&baseUrl=... -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="balanzabt" android:host="vincular" />
+            </intent-filter>
+
         </activity>
 
         <service

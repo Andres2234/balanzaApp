@@ -25,11 +25,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnIniciar: Button
     private lateinit var btnDetener: Button
     private lateinit var tvEstado: TextView
-    private lateinit var layoutPeso: android.widget.LinearLayout
+    private lateinit var layoutPeso: LinearLayout
     private lateinit var tvPeso: TextView
     private lateinit var tvEstadoPeso: TextView
     private lateinit var tvHora: TextView
     private lateinit var tvRaw: TextView
+    private lateinit var tvVinculado: TextView
     private var selectedDevice: BluetoothDevice? = null
 
     private val pesoReceiver = object : BroadcastReceiver() {
@@ -48,7 +49,7 @@ class MainActivity : AppCompatActivity() {
                     tvEstado.text = "Conectado a: $nombre"
                     AlertDialog.Builder(this@MainActivity)
                         .setTitle("Conectado con exito")
-                        .setMessage("Balanza: $nombre\nLeyendo peso en tiempo real...")
+                        .setMessage("Balanza: $nombre\nEnviando peso al backend...")
                         .setPositiveButton("OK", null)
                         .show()
                 }
@@ -59,7 +60,7 @@ class MainActivity : AppCompatActivity() {
                 BalanzaForegroundService.ACTION_RAW -> {
                     val raw = intent.getStringExtra(BalanzaForegroundService.EXTRA_RAW) ?: ""
                     layoutPeso.visibility = android.view.View.VISIBLE
-                    tvRaw.text = "Datos BT recibidos:\n$raw"
+                    tvRaw.text = "Datos BT:\n$raw"
                 }
             }
         }
@@ -78,9 +79,42 @@ class MainActivity : AppCompatActivity() {
         tvEstadoPeso = findViewById(R.id.tvEstadoPeso)
         tvHora       = findViewById(R.id.tvHora)
         tvRaw        = findViewById(R.id.tvRaw)
+        tvVinculado  = findViewById(R.id.tvVinculado)
 
         layoutPeso.visibility = android.view.View.GONE
+
+        // Verificar si viene de Deep Link (desde la web)
+        manejarDeepLink()
+
         verificarYPedirPermisos()
+    }
+
+    private fun manejarDeepLink() {
+        intent?.data?.let { uri ->
+            if (uri.scheme == "balanzabt" && uri.host == "vincular") {
+                val token   = uri.getQueryParameter("token")
+                val usuario = uri.getQueryParameter("usuario")
+                val baseUrl = uri.getQueryParameter("baseUrl")
+
+                if (token != null && usuario != null && baseUrl != null) {
+                    getSharedPreferences("BalanzaPrefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putString("auth_token", token)
+                        .putString("usuario",    usuario)
+                        .putString("base_url",   baseUrl)
+                        .apply()
+
+                    tvVinculado.text       = "Vinculado: $usuario"
+                    tvVinculado.visibility = android.view.View.VISIBLE
+
+                    AlertDialog.Builder(this)
+                        .setTitle("Vinculado con exito")
+                        .setMessage("Usuario: $usuario\nServidor: $baseUrl\n\nAhora selecciona tu balanza y presiona Iniciar.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        }
     }
 
     override fun onResume() {
@@ -92,6 +126,15 @@ class MainActivity : AppCompatActivity() {
             addAction(BalanzaForegroundService.ACTION_RAW)
         }
         registerReceiver(pesoReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+
+        // Mostrar info de vinculación guardada
+        val prefs   = getSharedPreferences("BalanzaPrefs", Context.MODE_PRIVATE)
+        val usuario = prefs.getString("usuario", null)
+        val baseUrl = prefs.getString("base_url", null)
+        if (usuario != null && baseUrl != null) {
+            tvVinculado.text       = "Vinculado: $usuario | $baseUrl"
+            tvVinculado.visibility = android.view.View.VISIBLE
+        }
     }
 
     override fun onPause() {
@@ -103,46 +146,59 @@ class MainActivity : AppCompatActivity() {
         layoutPeso.visibility = android.view.View.VISIBLE
         tvPeso.text = "$peso kg"
         tvHora.text = "Ultima lectura: $hora"
-        val (color, emoji) = when (codigo) {
+        val (color, texto) = when (codigo) {
             "B"  -> Pair("#28a745", "Estable")
             "@"  -> Pair("#dc3545", "Inestable")
             "C"  -> Pair("#007bff", "Cero Estable")
             "A"  -> Pair("#fd7e14", "Cero Inestable")
             else -> Pair("#888888", estado)
         }
-        tvEstadoPeso.text = emoji
+        tvEstadoPeso.text = texto
         tvEstadoPeso.setTextColor(android.graphics.Color.parseColor(color))
     }
 
     private fun verificarYPedirPermisos() {
         val faltantes = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED)
                 faltantes.add(Manifest.permission.BLUETOOTH_CONNECT)
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN)
+                != PackageManager.PERMISSION_GRANTED)
                 faltantes.add(Manifest.permission.BLUETOOTH_SCAN)
         }
-        if (faltantes.isNotEmpty()) {
+        if (faltantes.isNotEmpty())
             ActivityCompat.requestPermissions(this, faltantes.toTypedArray(), PERM_REQUEST)
-        } else {
+        else
             cargarDispositivos()
-        }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<String>, grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) cargarDispositivos()
-        else tvEstado.text = "Permisos Bluetooth denegados"
+        if (grantResults.all { it == PackageManager.PERMISSION_GRANTED })
+            cargarDispositivos()
+        else
+            tvEstado.text = "Permisos Bluetooth denegados"
     }
 
     private fun cargarDispositivos() {
         val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null || !adapter.isEnabled) { tvEstado.text = "Activa el Bluetooth"; return }
+        if (adapter == null || !adapter.isEnabled) {
+            tvEstado.text = "Activa el Bluetooth"
+            return
+        }
         val paired = adapter.bondedDevices.toList()
-        if (paired.isEmpty()) { tvEstado.text = "No hay dispositivos emparejados"; return }
+        if (paired.isEmpty()) {
+            tvEstado.text = "No hay dispositivos emparejados"
+            return
+        }
 
         val nombres = paired.map { it.name ?: it.address }.toTypedArray()
-        listView.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, nombres)
+        listView.adapter = ArrayAdapter(
+            this, android.R.layout.simple_list_item_single_choice, nombres
+        )
         listView.choiceMode = ListView.CHOICE_MODE_SINGLE
 
         val prefs = getSharedPreferences("BalanzaPrefs", Context.MODE_PRIVATE)
@@ -153,18 +209,24 @@ class MainActivity : AppCompatActivity() {
         }
         tvEstado.text = "Selecciona tu balanza y presiona Iniciar"
 
-        listView.setOnItemClickListener { _, _, position, _ -> selectedDevice = paired[position] }
+        listView.setOnItemClickListener { _, _, position, _ ->
+            selectedDevice = paired[position]
+        }
 
         btnIniciar.setOnClickListener {
             val dev = selectedDevice ?: run {
                 Toast.makeText(this, "Selecciona una balanza primero", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            prefs.edit().putString("last_device_address", dev.address).putString("last_device_name", dev.name ?: dev.address).apply()
+            prefs.edit()
+                .putString("last_device_address", dev.address)
+                .putString("last_device_name",    dev.name ?: dev.address)
+                .apply()
+
             val serviceIntent = Intent(this, BalanzaForegroundService::class.java).apply {
                 action = BalanzaForegroundService.ACTION_SELECCIONAR_DISPOSITIVO
                 putExtra(BalanzaForegroundService.EXTRA_DEVICE_ADDRESS, dev.address)
-                putExtra(BalanzaForegroundService.EXTRA_DEVICE_NAME, dev.name ?: "Balanza")
+                putExtra(BalanzaForegroundService.EXTRA_DEVICE_NAME,    dev.name ?: "Balanza")
             }
             startForegroundService(serviceIntent)
             tvEstado.text = "Conectando a ${dev.name}..."
