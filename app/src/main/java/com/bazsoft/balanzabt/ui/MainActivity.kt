@@ -62,6 +62,10 @@ class MainActivity : AppCompatActivity() {
                     layoutPeso.visibility = android.view.View.VISIBLE
                     tvRaw.text = "Datos BT:\n$raw"
                 }
+                BalanzaForegroundService.ACTION_DESVINCULADO -> {
+                    // Balanza desconectada por mucho tiempo — limpiar token
+                    limpiarVinculacion()
+                }
             }
         }
     }
@@ -83,7 +87,7 @@ class MainActivity : AppCompatActivity() {
 
         layoutPeso.visibility = android.view.View.GONE
 
-        // Verificar si viene de Deep Link (desde la web)
+        // SIEMPRE manejar deep link — sobreescribe lo guardado
         manejarDeepLink()
 
         verificarYPedirPermisos()
@@ -93,28 +97,51 @@ class MainActivity : AppCompatActivity() {
         intent?.data?.let { uri ->
             if (uri.scheme == "balanzabt" && uri.host == "vincular") {
                 val token   = uri.getQueryParameter("token")
-                val usuario = uri.getQueryParameter("usuario")
+                val usuario = uri.getQueryParameter("usuario")?.trim()
                 val baseUrl = uri.getQueryParameter("baseUrl")
 
                 if (token != null && usuario != null && baseUrl != null) {
+                    // SIEMPRE sobreescribir — nunca usar datos viejos
                     getSharedPreferences("BalanzaPrefs", Context.MODE_PRIVATE)
                         .edit()
                         .putString("auth_token", token)
                         .putString("usuario",    usuario)
                         .putString("base_url",   baseUrl)
+                        .putLong("token_tiempo", System.currentTimeMillis())
                         .apply()
 
-                    tvVinculado.text       = "Vinculado: $usuario"
+                    tvVinculado.text       = "Vinculado: $usuario | $baseUrl"
                     tvVinculado.visibility = android.view.View.VISIBLE
 
                     AlertDialog.Builder(this)
                         .setTitle("Vinculado con exito")
-                        .setMessage("Usuario: $usuario\nServidor: $baseUrl\n\nAhora selecciona tu balanza y presiona Iniciar.")
+                        .setMessage("Usuario: $usuario\nServidor: $baseUrl\n\nSelecciona tu balanza y presiona Iniciar.")
                         .setPositiveButton("OK", null)
                         .show()
                 }
             }
         }
+    }
+
+    private fun limpiarVinculacion() {
+        getSharedPreferences("BalanzaPrefs", Context.MODE_PRIVATE)
+            .edit()
+            .remove("auth_token")
+            .remove("usuario")
+            .remove("base_url")
+            .remove("token_tiempo")
+            .apply()
+
+        tvVinculado.text       = "Sin vincular — abre la web para vincular"
+        tvVinculado.visibility = android.view.View.VISIBLE
+        tvEstado.text          = "Desvinculado por inactividad"
+        layoutPeso.visibility  = android.view.View.GONE
+
+        AlertDialog.Builder(this)
+            .setTitle("Sesion expirada")
+            .setMessage("La balanza estuvo desconectada demasiado tiempo.\n\nVuelve a la web y presiona Vincular Balanza.")
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     override fun onResume() {
@@ -124,6 +151,7 @@ class MainActivity : AppCompatActivity() {
             addAction(BalanzaForegroundService.ACTION_CONECTADO)
             addAction(BalanzaForegroundService.ACTION_ERROR)
             addAction(BalanzaForegroundService.ACTION_RAW)
+            addAction(BalanzaForegroundService.ACTION_DESVINCULADO)
         }
         registerReceiver(pesoReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
 
@@ -133,6 +161,9 @@ class MainActivity : AppCompatActivity() {
         val baseUrl = prefs.getString("base_url", null)
         if (usuario != null && baseUrl != null) {
             tvVinculado.text       = "Vinculado: $usuario | $baseUrl"
+            tvVinculado.visibility = android.view.View.VISIBLE
+        } else {
+            tvVinculado.text       = "Sin vincular — abre la web para vincular"
             tvVinculado.visibility = android.view.View.VISIBLE
         }
     }
@@ -205,7 +236,10 @@ class MainActivity : AppCompatActivity() {
         val savedAddress = prefs.getString("last_device_address", null)
         if (savedAddress != null) {
             val idx = paired.indexOfFirst { it.address == savedAddress }
-            if (idx >= 0) { listView.setItemChecked(idx, true); selectedDevice = paired[idx] }
+            if (idx >= 0) {
+                listView.setItemChecked(idx, true)
+                selectedDevice = paired[idx]
+            }
         }
         tvEstado.text = "Selecciona tu balanza y presiona Iniciar"
 
@@ -218,6 +252,17 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Selecciona una balanza primero", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
+            // Verificar que esté vinculado antes de iniciar
+            val token = prefs.getString("auth_token", null)
+            if (token == null) {
+                AlertDialog.Builder(this)
+                    .setTitle("Sin vincular")
+                    .setMessage("Primero debes vincular la app desde la web.\n\nAbre la web y presiona 'Vincular Balanza'.")
+                    .setPositiveButton("OK", null)
+                    .show()
+                return@setOnClickListener
+            }
+
             prefs.edit()
                 .putString("last_device_address", dev.address)
                 .putString("last_device_name",    dev.name ?: dev.address)
@@ -234,9 +279,15 @@ class MainActivity : AppCompatActivity() {
 
         btnDetener.setOnClickListener {
             stopService(Intent(this, BalanzaForegroundService::class.java))
-            prefs.edit().remove("last_device_address").apply()
-            tvEstado.text = "Servicio detenido"
-            layoutPeso.visibility = android.view.View.GONE
+            prefs.edit()
+                .remove("last_device_address")
+                .remove("auth_token")
+                .remove("usuario")
+                .remove("base_url")
+                .apply()
+            tvEstado.text          = "Servicio detenido"
+            tvVinculado.text       = "Sin vincular — abre la web para vincular"
+            layoutPeso.visibility  = android.view.View.GONE
         }
     }
 }
