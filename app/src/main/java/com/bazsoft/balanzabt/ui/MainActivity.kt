@@ -277,6 +277,9 @@ class MainActivity : AppCompatActivity() {
             tvEstado.text = "Conectando a ${dev.name}..."
         }
 
+	findViewById<Button>(R.id.btnPatrones).setOnClickListener {
+    		startActivity(Intent(this, PatronesActivity::class.java))
+	}
         btnDetener.setOnClickListener {
             stopService(Intent(this, BalanzaForegroundService::class.java))
             prefs.edit()
