@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.bazsoft.balanzabt.model.PatronService
 import com.bazsoft.balanzabt.ui.MainActivity
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -25,9 +26,7 @@ class BalanzaForegroundService : Service() {
         const val TAG = "BalanzaService"
         const val CHANNEL_ID = "balanza_channel"
         const val NOTIF_ID = 1
-
-        // Tiempo máximo sin conectar antes de borrar token (30 segundos)
-        const val MAX_SEGUNDOS_DESCONECTADO = 30L
+        const val MAX_INTENTOS = 6 // 6 x 5s = 30s
 
         const val ACTION_SELECCIONAR_DISPOSITIVO = "SELECCIONAR_DISPOSITIVO"
         const val ACTION_PESO_RECIBIDO  = "com.bazsoft.balanzabt.PESO_RECIBIDO"
@@ -53,8 +52,9 @@ class BalanzaForegroundService : Service() {
     private var deviceAddress: String? = null
     private var deviceName: String = "Balanza"
     private var isRunning = false
-    private var intentosReconexion = 0
+    private var intentosFallidos = 0
     private lateinit var prefs: SharedPreferences
+    private lateinit var patronService: PatronService
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -64,19 +64,19 @@ class BalanzaForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        prefs = getSharedPreferences("BalanzaPrefs", Context.MODE_PRIVATE)
+        prefs         = getSharedPreferences("BalanzaPrefs", Context.MODE_PRIVATE)
+        patronService = PatronService(this)
         crearCanalNotificacion()
         adquirirWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIF_ID, construirNotificacion("Iniciando...", "Balanza BT"))
-
         if (intent?.action == ACTION_SELECCIONAR_DISPOSITIVO) {
-            deviceAddress      = intent.getStringExtra(EXTRA_DEVICE_ADDRESS)
-            deviceName         = intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "Balanza"
-            isRunning          = true
-            intentosReconexion = 0
+            deviceAddress    = intent.getStringExtra(EXTRA_DEVICE_ADDRESS)
+            deviceName       = intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "Balanza"
+            isRunning        = true
+            intentosFallidos = 0
             Thread { loopConexion() }.start()
         }
         return START_STICKY
@@ -85,41 +85,23 @@ class BalanzaForegroundService : Service() {
     private fun loopConexion() {
         while (isRunning) {
             try {
-                intentosReconexion++
+                intentosFallidos++
                 actualizarNotificacion("Conectando a $deviceName...")
                 conectarYLeer()
-                // Si llegó aquí, se desconectó normalmente — resetear intentos
-                intentosReconexion = 0
+                intentosFallidos = 0
             } catch (e: Exception) {
                 Log.e(TAG, "Error: ${e.message}")
                 enviarBroadcast(ACTION_ERROR, error = "${e.message}")
-
-                // Si lleva más de MAX_SEGUNDOS_DESCONECTADO sin conectar, borrar token
-                val segundosDesconectado = intentosReconexion * 5L
-                if (segundosDesconectado >= MAX_SEGUNDOS_DESCONECTADO) {
-                    Log.w(TAG, "Desconectado por $segundosDesconectado seg — borrando token")
+                if (intentosFallidos >= MAX_INTENTOS) {
                     borrarToken()
                     actualizarNotificacion("Desvinculado por inactividad")
-                    // Detener el servicio
                     stopSelf()
                     return
                 }
-
-                actualizarNotificacion("Reconectando en 5s (intento $intentosReconexion)...")
+                actualizarNotificacion("Reconectando en 5s (intento $intentosFallidos)...")
                 Thread.sleep(5000)
             }
         }
-    }
-
-    private fun borrarToken() {
-        prefs.edit()
-            .remove("auth_token")
-            .remove("usuario")
-            .remove("base_url")
-            .remove("token_tiempo")
-            .apply()
-        // Notificar a la UI para que muestre el mensaje
-        enviarBroadcast(ACTION_DESVINCULADO)
     }
 
     private fun conectarYLeer() {
@@ -130,8 +112,7 @@ class BalanzaForegroundService : Service() {
         bluetoothSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
         bluetoothSocket!!.connect()
 
-        // Conexión exitosa — resetear intentos
-        intentosReconexion = 0
+        intentosFallidos = 0
         Log.d(TAG, "Conectado a $deviceName")
         actualizarNotificacion("Conectado — enviando peso...")
         enviarBroadcast(ACTION_CONECTADO)
@@ -150,10 +131,16 @@ class BalanzaForegroundService : Service() {
 
             acumulado.append(fragment)
 
+            // Usar el terminador del patrón activo
+            val terminador = patronService.obtenerPatronActivo().terminador
+                .replace("\\n", "\n")
+                .replace("\\r\\n", "\r\n")
+                .replace("\\r", "\r")
+
             var idx: Int
-            while (acumulado.indexOf("=").also { idx = it } >= 0) {
+            while (acumulado.indexOf(terminador).also { idx = it } >= 0) {
                 val trama = acumulado.substring(0, idx)
-                acumulado.delete(0, idx + 1)
+                acumulado.delete(0, idx + terminador.length)
                 procesarTrama(trama)
             }
 
@@ -165,103 +152,93 @@ class BalanzaForegroundService : Service() {
     }
 
     private fun procesarTrama(trama: String) {
-        if (trama.length < 9) return
+        val patron = patronService.obtenerPatronActivo()
 
-        val pesoReal   = trama.substring(0, 8).trim()
-        val digControl = trama.substring(8, 9)
-        val estado = when (digControl) {
-            "B"  -> "Estable"
-            "@"  -> "Inestable"
-            "C"  -> "Cero Estable"
-            "A"  -> "Cero Inestable"
-            else -> "Desconocido ($digControl)"
+        try {
+            val regex = Regex(patron.regex)
+            val match = regex.find(trama.trim()) ?: run {
+                Log.w(TAG, "No coincide con patron [${patron.nombre}]: [$trama]")
+                return
+            }
+
+            val pesoReal   = match.groupValues.getOrNull(patron.grupoPeso)?.trim() ?: return
+            val digControl = match.groupValues.getOrNull(patron.grupoEstado)?.trim() ?: return
+            val estado = when (digControl) {
+                patron.codigoEstable       -> "Estable"
+                patron.codigoInestable     -> "Inestable"
+                patron.codigoCeroEstable   -> "Cero Estable"
+                patron.codigoCeroInestable -> "Cero Inestable"
+                else                       -> "Desconocido ($digControl)"
+            }
+            val hora = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                .format(java.util.Date())
+
+            Log.d(TAG, "Peso=$pesoReal Estado=$estado Patron=${patron.nombre}")
+            actualizarNotificacion("$pesoReal kg — $estado")
+            enviarBroadcast(ACTION_PESO_RECIBIDO, pesoReal, estado, digControl, hora)
+            enviarAlBackend(pesoReal, estado, digControl)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error procesando trama: ${e.message}")
         }
-        val hora = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-            .format(java.util.Date())
+    }
 
-        Log.d(TAG, "Peso=$pesoReal Estado=$estado")
-        actualizarNotificacion("$pesoReal kg — $estado")
-
-        enviarBroadcast(ACTION_PESO_RECIBIDO, pesoReal, estado, digControl, hora)
-        enviarAlBackend(pesoReal, estado, digControl)
+    private fun borrarToken() {
+        prefs.edit().remove("auth_token").remove("usuario").remove("base_url").apply()
+        enviarBroadcast(ACTION_DESVINCULADO)
     }
 
     private fun enviarAlBackend(peso: String, estado: String, codigo: String) {
         val token   = prefs.getString("auth_token", null)
         val baseUrl = prefs.getString("base_url", null)
-
-        if (token == null || baseUrl == null) {
-            Log.w(TAG, "Sin token o baseUrl — no se envía al backend")
-            return
-        }
+        if (token == null || baseUrl == null) return
 
         val url  = "$baseUrl/api/balanza/peso"
         val json = """{"peso":"$peso","estado":"$estado","codigo":"$codigo"}"""
         val body = json.toRequestBody("application/json".toMediaType())
         val req  = Request.Builder()
-            .url(url)
-            .addHeader("X-Balanza-Token", token)
-            .post(body)
-            .build()
+            .url(url).addHeader("X-Balanza-Token", token).post(body).build()
 
         httpClient.newCall(req).enqueue(object : Callback {
             override fun onResponse(call: Call, response: Response) {
-                Log.d(TAG, "Backend OK: $peso — ${response.code}")
-                // Si el backend rechaza el token, desvincularse
-                if (response.code == 401) {
-                    Log.w(TAG, "Token rechazado por el backend — borrando")
-                    borrarToken()
-                    stopSelf()
-                }
+                if (response.code == 401) { borrarToken(); stopSelf() }
             }
             override fun onFailure(call: Call, e: IOException) {
-                Log.w(TAG, "Backend error: ${e.message}")
+                Log.w(TAG, "Backend no disponible: ${e.message}")
             }
         })
     }
 
     private fun enviarBroadcast(
-        action: String,
-        peso: String = "", estado: String = "", codigo: String = "",
+        action: String, peso: String = "", estado: String = "", codigo: String = "",
         hora: String = "", error: String = "", raw: String = ""
     ) {
         val intent = Intent(action).apply {
-            putExtra(EXTRA_PESO,        peso)
-            putExtra(EXTRA_ESTADO,      estado)
-            putExtra(EXTRA_CODIGO,      codigo)
-            putExtra(EXTRA_HORA,        hora)
-            putExtra(EXTRA_ERROR,       error)
-            putExtra(EXTRA_RAW,         raw)
-            putExtra(EXTRA_DEVICE_NAME, deviceName)
-            setPackage(packageName)
+            putExtra(EXTRA_PESO, peso); putExtra(EXTRA_ESTADO, estado)
+            putExtra(EXTRA_CODIGO, codigo); putExtra(EXTRA_HORA, hora)
+            putExtra(EXTRA_ERROR, error); putExtra(EXTRA_RAW, raw)
+            putExtra(EXTRA_DEVICE_NAME, deviceName); setPackage(packageName)
         }
         sendBroadcast(intent)
     }
 
     private fun construirNotificacion(texto: String, titulo: String): Notification {
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
-        )
+        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(titulo)
-            .setContentText(texto)
+            .setContentTitle(titulo).setContentText(texto)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
+            .setContentIntent(pi).setOngoing(true).build()
     }
 
     private fun actualizarNotificacion(texto: String) {
-        val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIF_ID, construirNotificacion("Balanza BT — $deviceName", texto))
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(NOTIF_ID, construirNotificacion("Balanza BT — $deviceName", texto))
     }
 
     private fun crearCanalNotificacion() {
-        val channel = NotificationChannel(
-            CHANNEL_ID, "Balanza Bluetooth", NotificationManager.IMPORTANCE_LOW
-        ).apply { description = "Servicio de lectura de balanza en segundo plano" }
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-            .createNotificationChannel(channel)
+        val ch = NotificationChannel(CHANNEL_ID, "Balanza Bluetooth", NotificationManager.IMPORTANCE_LOW)
+            .apply { description = "Servicio de lectura de balanza" }
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
     }
 
     private fun adquirirWakeLock() {

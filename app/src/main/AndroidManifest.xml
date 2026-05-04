@@ -44,7 +44,7 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
-
+	<activity android:name=".ui.PatronesActivity" android:exported="false"/>
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"

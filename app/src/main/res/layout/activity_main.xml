@@ -20,7 +20,6 @@
             android:gravity="center"
             android:paddingBottom="4dp"/>
 
-        <!-- Muestra usuario vinculado -->
         <TextView
             android:id="@+id/tvVinculado"
             android:layout_width="match_parent"
@@ -34,7 +33,6 @@
             android:visibility="gone"
             android:layout_marginBottom="12dp"/>
 
-        <!-- Panel de peso -->
         <LinearLayout
             android:id="@+id/layoutPeso"
             android:layout_width="match_parent"
@@ -142,7 +140,18 @@
             android:layout_height="52dp"
             android:text="DETENER"
             android:backgroundTint="#B71C1C"
-            android:textColor="#FFFFFF"/>
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="8dp"/>
+
+        <!-- Botón de configuración de patrones -->
+        <Button
+            android:id="@+id/btnPatrones"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:text="⚙ Configurar Patrones de Balanza"
+            android:backgroundTint="#455A64"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"/>
 
     </LinearLayout>
 </ScrollView>
